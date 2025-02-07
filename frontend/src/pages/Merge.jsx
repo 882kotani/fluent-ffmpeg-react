@@ -4,7 +4,7 @@ const App = () => {
   const [file1, setFile1] = useState(null);
   const [file2, setFile2] = useState(null);
   const [mergedVideo, setMergedVideo] = useState(null);
-  const port = 5003;
+  const port = 50;
 
   const handleFileChange1 = (e) => {
     setFile1(e.target.files[0]);

@@ -3,10 +3,10 @@ const multer = require("multer");
 const ffmpeg = require("fluent-ffmpeg");
 const fs = require("fs");
 const path = require("path");
-const cors = require("cors"); // CORSパッケージをインポート
+const cors = require("cors");
 
 const app = express();
-const port = 5003;
+const port = 5002;
 
 // CORSを許可する設定
 app.use(cors()); // 全てのリクエストを許可
@@ -109,55 +109,6 @@ app.post("/CutMp4", upload.single("video"), (req, res) => {
   }
 
   cutVideo();
-});
-
-//--------- 圧縮する----------//
-app.post("/Comp", upload.single("video"), (req, res) => {
-  const inputFile = req.file.path;
-  const bitrate = req.body.bitrate; // フォームから指定されたビットレートを取得
-  const outputFile = "./output/output.mp4";
-
-  // ffmpegを使ってビットレートを変更
-  ffmpeg(inputFile)
-    .videoCodec("libx264")
-    .audioCodec("aac")
-    .videoBitrate(bitrate)
-    .audioBitrate("128k")
-    .output(outputFile)
-    .on("end", () => {
-      console.log("ビットレート変更完了:", outputFile);
-
-      // ファイルが存在するか確認してからダウンロード
-      fs.access(outputFile, fs.constants.F_OK, (err) => {
-        if (err) {
-          console.error("出力ファイルが見つかりません:", err);
-          return res.status(500).json({ message: "出力ファイルがありません" });
-        }
-        res.download(outputFile, "output.mp4", (err) => {
-          if (err) {
-            console.error("ダウンロードエラー:", err);
-          } else {
-            console.log("ダウンロード成功:", outputFile);
-            // ダウンロード後にファイルを削除（非同期で処理）
-            // setTimeout(() => {
-            //   fs.unlink(outputFile, (unlinkErr) => {
-            //     if (unlinkErr) {
-            //       console.error("ファイル削除エラー:", unlinkErr);
-            //     } else {
-            //       console.log("ファイル削除成功:", outputFile);
-            //     }
-            //   });
-            // }, 5000); // 5秒待ってから削除（安全策）
-          }
-        });
-      });
-    })
-    .on("error", (err) => {
-      console.error("エラー:", err);
-      res.status(500).send("ビットレートの変更に失敗しました");
-    })
-    .run();
-  // }
 });
 
 app.post(
@@ -333,6 +284,116 @@ app.get("/download", (req, res) => {
     });
   } else {
     res.status(404).json({ message: "ファイルが見つかりません" });
+  }
+});
+
+// --------圧縮----------
+let processingFiles = {}; // ファイルの処理状況を管理する
+// 📌 1. ファイルアップロード & 変換開始
+app.post("/Comp", upload.single("video"), (req, res) => {
+  if (!req.file) {
+    return res
+      .status(400)
+      .json({ error: "ファイルがアップロードされていません。" });
+  }
+
+  const fileId = Date.now().toString();
+  const inputFile = req.file.path;
+  const outputFile = `./output/output_${fileId}.mp4`;
+  const bitrate = req.body.bitrate || "700k";
+
+  processingFiles[fileId] = { status: "processing", outputFile };
+
+  // 🛠️ 変換処理をバックグラウンドで実行
+  ffmpeg(inputFile)
+    .videoCodec("libx264")
+    .audioCodec("aac")
+    .videoBitrate(bitrate)
+    .audioBitrate("128k")
+    .save(outputFile)
+    .on("end", () => {
+      console.log(`✅ 変換完了: ${outputFile}`);
+      processingFiles[fileId].status = "done";
+    })
+    .on("error", (err) => {
+      console.error("❌ 変換エラー:", err);
+      processingFiles[fileId].status = "error";
+    });
+
+  // 📌 すぐにレスポンスを返す（フロントエンドはポーリングでステータス確認）
+  res.json({ fileId });
+});
+
+// 📌 2. 変換の進行状況を確認
+app.get("/Comp/status/:fileId", (req, res) => {
+  const fileId = req.params.fileId;
+  const fileInfo = processingFiles[fileId];
+
+  if (!fileInfo) {
+    return res.status(404).json({ error: "ファイルが見つかりません。" });
+  }
+
+  res.json({ status: fileInfo.status });
+});
+
+// 📌 3. 変換後のファイルをダウンロード
+app.get("/Comp/download/:fileId", (req, res) => {
+  const fileId = req.params.fileId;
+  const fileInfo = processingFiles[fileId];
+
+  if (!fileInfo || fileInfo.status !== "done") {
+    return res
+      .status(400)
+      .json({ error: "ファイルがまだ準備できていません。" });
+  }
+
+  res.download(fileInfo.outputFile, "conmpessed.mp4", (err) => {
+    if (!err) {
+      console.log(`🗑️ 削除: ${fileInfo.outputFile}`);
+      fs.unlinkSync(fileInfo.outputFile); // 変換後のファイル削除
+      delete processingFiles[fileId]; // 管理データ削除
+    }
+  });
+});
+
+/*--------レベルを上げる----------*/
+
+// outputディレクトリが存在しない場合は作成
+const outputDir = path.join(__dirname, "output");
+if (!fs.existsSync(outputDir)) {
+  fs.mkdirSync(outputDir);
+}
+app.use("/output", express.static(outputDir)); // outputディレクトリを静的提供
+
+app.post("/Volup", upload.single("file"), (req, res) => {
+  const inputFile = req.file.path;
+  const outputFileName = `${Date.now()}_output.mp4`;
+  const outputFile = path.join(outputDir, outputFileName);
+  const volumeIncreaseDb = req.body.volume || 0;
+
+  ffmpeg(inputFile)
+    .audioFilters(`volume=${volumeIncreaseDb}dB`)
+    .output(outputFile)
+    .on("end", () => {
+      res.json({
+        message: "Processed successfully",
+        output: outputFileName, // ファイル名のみ返す
+      });
+    })
+    .on("error", (err) => {
+      console.error("Error:", err);
+      res.status(500).json({ error: "Processing failed" });
+    })
+    .run();
+});
+
+// 追加: ダウンロード用のエンドポイント
+app.get("/download/:filename", (req, res) => {
+  const filePath = path.join(outputDir, req.params.filename);
+  if (fs.existsSync(filePath)) {
+    res.download(filePath, req.params.filename); // ダウンロードを開始
+  } else {
+    res.status(404).json({ error: "File not found" });
   }
 });
 
